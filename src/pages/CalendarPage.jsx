@@ -1,0 +1,230 @@
+﻿import React, { useState, useMemo } from 'react';
+import { useApp } from '../context/AppContext';
+import { supabase } from '../lib/supabase';
+import { SectionHeader, GlassCard, StatusBadge, Icon, Modal, FormRow, FormField } from '../components/ui';
+
+export const CalendarPage = () => {
+    const { data: MOCK, refreshData, exportToExcel, addAppointment, deleteAppointment } = useApp();
+    const appointments = MOCK.appointments || [];
+
+    const [currentDate, setCurrentDate] = useState(new Date());
+    const [selectedDay, setSelectedDay] = useState(new Date().getDate());
+    const [showModal, setShowModal] = useState(false);
+    const [loading, setLoading] = useState(false);
+
+    const [form, setForm] = useState({
+        title: '', client: '', vehicle: '', date: '', time: '09:00', box: 'Box 1', color: '#3b82f6', notes: ''
+    });
+
+    // =========================================
+    // Calendar Logic
+    // =========================================
+    const monthNames = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+    const days = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
+
+    const month = currentDate.getMonth();
+    const year = currentDate.getFullYear();
+
+    const prevMonth = () => setCurrentDate(new Date(year, month - 1, 1));
+    const nextMonth = () => setCurrentDate(new Date(year, month + 1, 1));
+
+    const firstDayOfMonth = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const startOffset = firstDayOfMonth === 0 ? 6 : firstDayOfMonth - 1; // Monday = 0
+
+    const cells = useMemo(() => {
+        const c = [];
+        for (let i = 0; i < startOffset; i++) c.push(null);
+        for (let d = 1; d <= daysInMonth; d++) c.push(d);
+        return c;
+    }, [month, year, startOffset, daysInMonth]);
+
+    const todayDate = new Date();
+    const isToday = (d) => d === todayDate.getDate() && month === todayDate.getMonth() && year === todayDate.getFullYear();
+
+    const getDateStr = (d) => `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+
+    const hasEvent = (d) => appointments.some(a => a.date === getDateStr(d));
+
+    const selectedAppointments = appointments.filter(a => a.date === getDateStr(selectedDay));
+
+    const upcomingAppointments = useMemo(() => {
+        const todayStr = getDateStr(todayDate.getDate());
+        return appointments
+            .filter(a => a.date > todayStr)
+            .sort((a, b) => a.date.localeCompare(b.date))
+            .slice(0, 5);
+    }, [appointments, month, year]);
+
+    const openNewAppointment = () => {
+        setForm({
+            title: '', client: '', vehicle: '',
+            date: getDateStr(selectedDay),
+            time: '09:00', box: 'Box 1', color: '#3b82f6', notes: ''
+        });
+        setShowModal(true);
+    };
+
+    const handleSaveAppointment = async () => {
+        if (!form.title || !form.date || !form.time) return alert('Título, fecha y hora son obligatorios');
+        setLoading(true);
+        try {
+            await addAppointment({
+                title: form.title,
+                client: form.client,
+                vehicle: form.vehicle,
+                date: form.date,
+                time: form.time,
+                box: form.box,
+                color: form.color,
+                notes: form.notes,
+                status: 'Pendiente'
+            });
+            setShowModal(false);
+        } catch (e) {
+            alert('Error al guardar turno: ' + e.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleDeleteAppointment = async (id) => {
+        if (!window.confirm('¿Eliminar este turno?')) return;
+        try {
+            await deleteAppointment(id);
+        } catch (e) {
+            console.error(e);
+            alert('Error al eliminar: ' + e.message);
+        }
+    };
+
+    return (
+        <div className="page-content">
+            <div className="page-grid grid-sidebar-narrow">
+                <div>
+                    <SectionHeader icon="calendar_month" title={`${monthNames[month]} ${year}`} right={
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                            <button className="btn btn-ghost btn-sm" onClick={prevMonth}><Icon name="chevron_left" size={20} /></button>
+                            <button className="btn btn-ghost btn-sm" onClick={nextMonth}><Icon name="chevron_right" size={20} /></button>
+                            <button className="btn btn-ghost btn-sm" onClick={() => exportToExcel('appointments')} title="Exportar Turnos a Excel"><Icon name="download" size={20} /></button>
+                            <button className="btn btn-primary btn-sm" onClick={openNewAppointment}><Icon name="add" size={16} /> Nuevo Turno</button>
+                        </div>
+                    } />
+                    <GlassCard style={{ padding: 20 }}>
+                        <div className="calendar-grid">
+                            {days.map(d => <div key={d} className="calendar-day-header">{d}</div>)}
+                            {cells.map((d, i) => (
+                                <div key={i}
+                                    className={`calendar-cell ${d && isToday(d) ? 'today' : ''} ${d && hasEvent(d) ? 'has-event' : ''} ${d === selectedDay ? 'selected' : ''}`}
+                                    onClick={() => d && setSelectedDay(d)}
+                                    style={{ cursor: d ? 'pointer' : 'default' }}>
+                                    {d && <span style={{ fontSize: 12, fontWeight: isToday(d) ? 700 : 400, color: isToday(d) ? 'var(--primary)' : d === selectedDay ? 'var(--accent)' : 'var(--text-secondary)' }}>{d}</span>}
+                                </div>
+                            ))}
+                        </div>
+                    </GlassCard>
+                </div>
+
+                <div>
+                    <SectionHeader icon="event" title={`Turnos — ${selectedDay}/${month + 1}/${year}`} />
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                        {selectedAppointments.length === 0 && (
+                            <GlassCard style={{ padding: 24, textAlign: 'center', opacity: 0.6 }}>
+                                <Icon name="event_busy" size={36} style={{ color: 'var(--text-muted)', marginBottom: 8 }} />
+                                <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No hay turnos para este día</div>
+                                <button className="btn btn-primary btn-sm" style={{ marginTop: 12 }} onClick={openNewAppointment}>
+                                    <Icon name="add" size={16} /> Agendar Turno
+                                </button>
+                            </GlassCard>
+                        )}
+                        {selectedAppointments.map(apt => (
+                            <GlassCard key={apt.id} style={{ padding: 16, borderLeft: `3px solid ${apt.color || 'var(--primary)'}` }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: 8 }}>
+                                    <div>
+                                        <div style={{ fontSize: 14, fontWeight: 700 }}>{apt.title}</div>
+                                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{apt.client} • {apt.vehicle}</div>
+                                    </div>
+                                    <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                                        <StatusBadge status={apt.status || 'Pendiente'} />
+                                        <button className="btn btn-ghost btn-sm" onClick={() => handleDeleteAppointment(apt.id)} style={{ color: 'var(--danger)', padding: 4 }}>
+                                            <Icon name="delete" size={16} />
+                                        </button>
+                                    </div>
+                                </div>
+                                <div style={{ display: 'flex', gap: 16, fontSize: 11, color: 'var(--text-muted)' }}>
+                                    <span><Icon name="schedule" size={14} /> {apt.time}</span>
+                                    <span><Icon name="garage" size={14} /> {apt.box}</span>
+                                </div>
+                                {apt.notes && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6, fontStyle: 'italic' }}>{apt.notes}</div>}
+                            </GlassCard>
+                        ))}
+                    </div>
+
+                    {upcomingAppointments.length > 0 && (
+                        <div style={{ marginTop: 20 }}>
+                            <SectionHeader icon="upcoming" title="Próximos Días" />
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                                {upcomingAppointments.map(apt => (
+                                    <GlassCard key={apt.id} style={{ padding: 14, opacity: 0.7 }}>
+                                        <div style={{ fontSize: 13, fontWeight: 600 }}>{apt.title}</div>
+                                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                                            {apt.date} {apt.time} • {apt.client}
+                                        </div>
+                                    </GlassCard>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            {showModal && (
+                <Modal title="Nuevo Turno" onClose={() => setShowModal(false)} width="550px"
+                    footer={<>
+                        <button className="btn btn-ghost" disabled={loading} onClick={() => setShowModal(false)}>Cancelar</button>
+                        <button className="btn btn-primary" disabled={loading} onClick={handleSaveAppointment}>{loading ? 'Guardando...' : 'Agendar Turno'}</button>
+                    </>}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                        <FormField label="Título / Motivo *">
+                            <input className="form-input" value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="Ej: Cambio de Aceite" />
+                        </FormField>
+                        <FormRow>
+                            <FormField label="Cliente">
+                                <input className="form-input" value={form.client} onChange={e => setForm({ ...form, client: e.target.value })} placeholder="Nombre del cliente" />
+                            </FormField>
+                            <FormField label="Vehículo">
+                                <input className="form-input" value={form.vehicle} onChange={e => setForm({ ...form, vehicle: e.target.value })} placeholder="Ej: Honda CRV 2020" />
+                            </FormField>
+                        </FormRow>
+                        <FormRow>
+                            <FormField label="Fecha *">
+                                <input type="date" className="form-input" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} />
+                            </FormField>
+                            <FormField label="Hora *">
+                                <input type="time" className="form-input" value={form.time} onChange={e => setForm({ ...form, time: e.target.value })} />
+                            </FormField>
+                        </FormRow>
+                        <FormRow>
+                            <FormField label="Box">
+                                <select className="form-select" value={form.box} onChange={e => setForm({ ...form, box: e.target.value })}>
+                                    {(MOCK.boxes || []).map(b => <option key={b.id} value={b.name}>{b.name}</option>)}
+                                    {(!MOCK.boxes || MOCK.boxes.length === 0) && <>
+                                        <option value="Box 1">Box 1</option>
+                                        <option value="Box 2">Box 2</option>
+                                        <option value="Box 3">Box 3</option>
+                                    </>}
+                                </select>
+                            </FormField>
+                            <FormField label="Color">
+                                <input type="color" className="form-input" value={form.color} onChange={e => setForm({ ...form, color: e.target.value })} style={{ height: 42, padding: 4 }} />
+                            </FormField>
+                        </FormRow>
+                        <FormField label="Notas adicionales">
+                            <textarea className="form-textarea" value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} placeholder="Observaciones..." />
+                        </FormField>
+                    </div>
+                </Modal>
+            )}
+        </div>
+    );
+};

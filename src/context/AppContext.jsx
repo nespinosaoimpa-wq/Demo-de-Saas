@@ -1,0 +1,1525 @@
+import React, { createContext, useContext, useState, useEffect } from 'react';
+import { supabase } from '../lib/supabase';
+import { MOCK } from '../data/data';
+import * as XLSX from 'xlsx';
+import { useAuth } from './AuthContext';
+
+const AppContext = createContext();
+
+
+export const AppProvider = ({ children }) => {
+    const { user } = useAuth();
+
+    const logAudit = async (action, details = null) => {
+        if (!user) return;
+        try {
+            await supabase.from('audit_logs').insert([{
+                employee_id: user.id,
+                action,
+                details,
+                path: window.location?.pathname || '/'
+            }]);
+        } catch (e) { console.error('Error de auditoría:', e); }
+    };
+
+    const [data, setData] = useState({
+        clients: [],
+        vehicles: [],
+        workOrders: [],
+        inventory: [],
+        suppliers: [],
+        boxes: MOCK.boxes,
+        vehicleNotes: [],
+        payments: [],
+        cashClosings: [],
+        appointments: [],
+        promotions: [],
+        assignments: [],
+        vehicleHealth: [],
+        brands: [],
+        dailyWorkLog: [],
+        dailyQuickServices: [],
+        employees: [],
+        activityLog: [],
+        workOrderItems: [],
+        clientCredits: []
+    });
+    const [loading, setLoading] = useState(true);
+
+    // ==========================================
+    // Fichaje Personal (Time Tracking)
+    // ==========================================
+    const [timeTrackingLogs, setTimeTrackingLogs] = useState([]);
+
+    // ==========================================
+    // Carrito de Ventas & Cola de Trabajo
+    // ==========================================
+    const [posCart, setPosCart] = useState(() => {
+        const saved = localStorage.getItem('piripi_pos_cart');
+        return saved ? JSON.parse(saved) : [];
+    });
+    
+    const [gomeriaQueue, setGomeriaQueue] = useState(() => {
+        const saved = localStorage.getItem('piripi_gomeria_queue');
+        return saved ? JSON.parse(saved) : [];
+    });
+
+    useEffect(() => {
+        localStorage.setItem('piripi_pos_cart', JSON.stringify(posCart));
+    }, [posCart]);
+
+    useEffect(() => {
+        localStorage.setItem('piripi_gomeria_queue', JSON.stringify(gomeriaQueue));
+    }, [gomeriaQueue]);
+
+    const addToPosCart = (item) => {
+        setPosCart(prev => {
+            const existing = prev.findIndex(i => i.id === item.id && !item.isCustom);
+            if (existing !== -1) {
+                return prev.map((i, idx) => idx === existing ? { ...i, qty: (i.qty || 1) + (item.qty || 1), currentPrice: i.price * ((i.qty || 1) + (item.qty || 1)) } : i);
+            }
+            return [...prev, { ...item, qty: item.qty || 1, currentPrice: item.price * (item.qty || 1) }];
+        });
+    };
+
+    const removeFromPosCart = (idx) => {
+        setPosCart(prev => prev.filter((_, i) => i !== idx));
+    };
+
+    const clearPosCart = () => setPosCart([]);
+
+    const addToQueue = (name) => {
+        const newItem = { id: Date.now(), name, services: [], created_at: new Date().toISOString() };
+        setGomeriaQueue(prev => [...prev, newItem]);
+        return newItem;
+    };
+
+    const removeFromQueue = (id) => {
+        setGomeriaQueue(prev => prev.filter(q => q.id !== id));
+    };
+
+    const addTimeLog = async (pin, type) => {
+        if (!pin) throw new Error('Debe ingresar un PIN');
+        
+        const allEmployees = data.employees || [];
+        const emp = allEmployees.find(e => String(e.pin) === String(pin));
+        
+        if (!emp) {
+            throw new Error('PIN incorrecto. Empleado no encontrado.');
+        }
+
+        // Anti-duplicate cooldown: bloquear si el mismo empleado fichó hace menos de 60 segundos
+        const lastLog = timeTrackingLogs.find(l => l.employee_id === emp.id && l.type === type);
+        if (lastLog) {
+            const elapsed = (Date.now() - new Date(lastLog.timestamp).getTime()) / 1000;
+            if (elapsed < 60) {
+                throw new Error(`Ya se registró ${type === 'IN' ? 'ENTRADA' : 'SALIDA'} para ${emp.name} hace ${Math.round(elapsed)} segundos. Esperá al menos 1 minuto.`);
+            }
+        }
+
+        const now = new Date();
+        const newLogData = {
+            employee_id: emp.id,
+            employee_name: emp.name || 'Empleado',
+            type: type, // 'IN' or 'OUT'
+            timestamp: now.toISOString(),
+            time_display: now.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })
+        };
+
+        // Persistir en Supabase (tabla attendance_logs)
+        const { data: inserted, error } = await supabase
+            .from('attendance_logs')
+            .insert([newLogData])
+            .select()
+            .single();
+
+        if (error) {
+            console.error("Error saving attendance log", error);
+            throw new Error('Error al registrar en la base de datos: ' + error.message);
+        }
+
+        // Update local state
+        const updatedLog = inserted || { ...newLogData, id: Date.now().toString() };
+        setTimeTrackingLogs(prev => [updatedLog, ...prev]);
+
+        return { 
+            log: updatedLog, 
+            emp: emp, 
+            time: updatedLog.time_display,
+            name: emp.name || 'Empleado'
+        };
+    };
+
+    const deleteTimeLog = async (id) => {
+        try {
+            const { error } = await supabase.from('attendance_logs').delete().eq('id', id);
+            if (error) throw error;
+            
+            setTimeTrackingLogs(prev => prev.filter(l => l.id !== id));
+            logAudit('Eliminar Fichaje', { log_id: id });
+            return true;
+        } catch (e) {
+            console.error("Error deleting attendance log", e);
+            throw e;
+        }
+    };
+
+    const getActiveEmployees = () => {
+        const active = [];
+        const employees = (data.employees || []).filter(emp => emp.is_active !== false);
+
+        employees.forEach(emp => {
+            const lastLog = timeTrackingLogs.find(l => l.employee_id === emp.id);
+            if (lastLog && lastLog.type === 'IN') {
+                active.push({
+                    ...emp,
+                    since: new Date(lastLog.timestamp).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }),
+                    logged_at: lastLog.timestamp
+                });
+            }
+        });
+        return active.sort((a, b) => new Date(b.logged_at) - new Date(a.logged_at));
+    };
+
+
+    const loadData = async () => {
+        setLoading(true);
+        // DESCONEXIÓN TOTAL: Usamos exclusivamente MOCK DATA para el demo. No se llama a Supabase.
+        setData({
+            clients: MOCK.clients || [],
+            vehicles: MOCK.vehicles || [],
+            workOrders: MOCK.workOrders || [],
+            inventory: MOCK.inventory || [],
+            suppliers: MOCK.suppliers || [],
+            boxes: MOCK.boxes || [],
+            vehicleNotes: [],
+            payments: [],
+            cashClosings: [],
+            appointments: [],
+            promotions: [],
+            assignments: [],
+            employees: [{ id: 'admin-demo', name: 'Administrador Demo', role: 'admin', pin: '1234' }],
+            workOrderItems: [],
+            dailyQuickServices: [],
+            employeeEarnings: [],
+            quickServiceAssignments: [],
+            clientCredits: [],
+            vehicleHealth: [], brands: [],
+            dailyWorkLog: [], serviceHistory: [], 
+            activityLog: []
+        });
+        setTimeTrackingLogs([]);
+        setLoading(false);
+    };
+
+    useEffect(() => {
+        loadData();
+    }, []);
+
+    // ==========================================
+    // Helpers
+    // ==========================================
+    const getClient = (id) => (data.clients || []).find(c => c.id === id);
+    const getVehicle = (id) => (data.vehicles || []).find(v => v.id === id);
+    const getClientVehicles = (clientId) => (data.vehicles || []).filter(v => v && v.client_id === clientId);
+    const getLowStockItems = () => (data.inventory || []).filter(i =>
+        (i && i.stock_type === 'UNIT' && i.stock_quantity <= i.stock_min) ||
+        (i && i.stock_type === 'VOLUME' && i.stock_ml <= i.stock_min_ml)
+    );
+
+    const addQuickService = async (itemsOrAction, mechanicIds = [], clientId = null, vehicleId = null, paymentOptions = { method: 'EFECTIVO', combinedAmounts: null }, overrideTotal = null) => {
+        const items = Array.isArray(itemsOrAction) ? itemsOrAction : [itemsOrAction];
+        const labels = items.map(i => i.label).join(', ');
+        
+        // Convertir mechanicIds a array si viene como un solo ID (compatibilidad)
+        const assignedMechanicIds = Array.isArray(mechanicIds) ? mechanicIds : (mechanicIds ? [mechanicIds] : []);
+        const primaryMechanicId = assignedMechanicIds.length > 0 ? assignedMechanicIds[0] : null;
+
+        const subtotal = items.reduce((sum, i) => sum + (i.price || i.currentPrice || 0), 0);
+        const finalPrice = overrideTotal !== null ? overrideTotal : subtotal;
+
+        // Calcular base de mano de obra (items que no son de inventario)
+        const laborItems = items.filter(item => !item.inventory_item && !(data.inventory || []).find(i => i.id === item.id));
+        const laborTotal = laborItems.reduce((sum, i) => sum + (i.price || i.currentPrice || 0), 0);
+        
+        // Si se pasó un solo ID (compatibilidad), convertirlo a array
+        const finalMechanicIds = assignedMechanicIds;
+
+        try {
+            // 1. Intentar persistir en tabla de servicios rápidos
+            let newService = null;
+            try {
+                const { data: qData, error } = await supabase.from('daily_quick_services').insert([{
+                    service_type: labels,
+                    price: finalPrice,
+                    mechanic_id: primaryMechanicId, // Guardamos el primero como principal
+                    client_id: clientId,
+                    vehicle_id: vehicleId
+                }]).select().single();
+
+                if (!error && qData) {
+                    newService = qData;
+                    // 1.1 Registrar asignaciones múltiples y comisiones
+                    if (finalMechanicIds.length > 0) {
+                        const dividedLabor = laborTotal / finalMechanicIds.length;
+                        
+                        // Tabla intermedia de asignaciones
+                        const assignments = finalMechanicIds.map(mId => ({
+                            quick_service_id: qData.id,
+                            employee_id: mId
+                        }));
+                        await supabase.from('daily_quick_service_assignments').insert(assignments);
+
+                        // Historial de ganancias
+                        for (const mId of finalMechanicIds) {
+                            const emp = (data.employees || []).find(e => e.id === mId);
+                            const rate = emp ? (parseFloat(emp.commission_rate) || 0) : 0;
+                            const amountEarned = dividedLabor * (rate / 100);
+
+                            if (amountEarned > 0) {
+                                await supabase.from('employee_earnings').insert([{
+                                    employee_id: mId,
+                                    quick_service_id: qData.id,
+                                    amount_earned: amountEarned,
+                                    description: `Comisión Gomería (${finalMechanicIds.length} operarios): ${labels}`
+                                }]);
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn('Tabla daily_quick_services no disponible o error en asignaciones, continuando...', e.message);
+            }
+
+            // 2. Registrar pago automático en caja
+            if (finalPrice > 0) {
+                const cashierId = primaryMechanicId || null;
+                if (paymentOptions.method === 'COMBINADO' && paymentOptions.combinedAmounts) {
+                    for (const [method, amount] of Object.entries(paymentOptions.combinedAmounts)) {
+                        const amt = parseFloat(amount);
+                        if (amt > 0) {
+                            await addPayment({
+                                amount: amt,
+                                method: method,
+                                description: `Gomería Express (${method}): ${labels}`,
+                                type: 'INGRESO',
+                                reference: 'DIRECTO',
+                                employee_id: cashierId
+                            });
+                        }
+                    }
+                } else {
+                    await addPayment({
+                        amount: finalPrice,
+                        method: paymentOptions.method,
+                        description: `Gomería Express: ${labels}`,
+                        type: 'INGRESO',
+                        reference: 'DIRECTO',
+                        employee_id: cashierId
+                    });
+                }
+            }
+
+            // 3. DESCONTAR STOCK
+            for (const item of items) {
+                const invItem = item.inventory_item || (data.inventory || []).find(i => i.id === item.id);
+                if (invItem) {
+                    const qty = item.qty || 1;
+                    if (invItem.stock_type === 'UNIT') {
+                        await supabase.from('inventory').update({
+                            stock_quantity: Math.max(0, (invItem.stock_quantity || 0) - qty)
+                        }).eq('id', invItem.id);
+                    } else if (invItem.stock_type === 'VOLUME') {
+                        const mlToDeduct = Math.round(qty * 1000);
+                        await supabase.from('inventory').update({
+                            stock_ml: Math.max(0, (invItem.stock_ml || 0) - mlToDeduct)
+                        }).eq('id', invItem.id);
+                    }
+                }
+            }
+
+            // 4. Actualizar estado local
+            setData(prev => ({
+                ...prev,
+                dailyQuickServices: [newService || { id: Date.now().toString(), service_type: labels, price: finalPrice, mechanic_id: primaryMechanicId, created_at: new Date().toISOString() }, ...(prev.dailyQuickServices || [])],
+                activityLog: [{ label: labels, price: finalPrice, timestamp: new Date().toISOString(), mechanic_id: primaryMechanicId }, ...(prev.activityLog || [])]
+            }));
+
+            await loadData(); // Reload inventory
+            logAudit('Gomería Express', { service: labels, total: finalPrice, mechanics_count: finalMechanicIds.length });
+        } catch (e) {
+            console.error("Error registering express service", e);
+            alert("Error al registrar servicio rápido: " + e.message);
+        }
+    };
+
+
+    const exportToExcel = (dataType) => {
+        let rows = [];
+        let filename = 'export.xlsx';
+
+        if (dataType === 'payments') {
+            rows = (data.payments || []).map(p => ({
+                Fecha: p.date ? new Date(p.date).toLocaleString('es-AR') : '',
+                Monto: p.amount,
+                Metodo: p.method || p.payment_method || 'EFECTIVO',
+                Tipo: p.type || (p.amount < 0 ? 'EGRESO' : 'INGRESO'),
+                Descripcion: p.description || ''
+            }));
+            filename = `movimientos_caja_${new Date().toISOString().split('T')[0]}.xlsx`;
+        } else if (dataType === 'inventory') {
+            rows = (data.inventory || []).map(i => ({
+                Producto: i.name || '',
+                Marca: i.brand || '',
+                Precio_Venta: i.sell_price || 0,
+                Stock: i.stock_type === 'UNIT' ? (i.stock_quantity || 0) : (i.stock_ml || 0),
+                Tipo: i.stock_type || 'UNIT'
+            }));
+            filename = `inventario_${new Date().toISOString().split('T')[0]}.xlsx`;
+        } else if (dataType === 'sales') {
+            rows = (data.payments || []).filter(p => p.type === 'INGRESO' && p.description?.includes('Venta')).map(s => ({
+                Fecha: s.date ? new Date(s.date).toLocaleString('es-AR') : '',
+                Monto_Total: s.amount,
+                Metodo_Pago: s.method || s.payment_method || '',
+                Cajero: s.cashier_id || 'LOCAL',
+                Detalle: s.description || ''
+            }));
+            filename = `punto_de_venta_${new Date().toISOString().split('T')[0]}.xlsx`;
+        } else if (dataType === 'work_orders') {
+            rows = (data.workOrders || []).map(wo => {
+                const client = data.clients?.find(c => c.id === wo.client_id);
+                return {
+                    Nro_Orden: wo.order_number || '',
+                    Fecha_Ingreso: wo.created_at ? new Date(wo.created_at).toLocaleDateString('es-AR') : '',
+                    Cliente: client ? `${client.first_name} ${client.last_name}` : 'N/A',
+                    Vehiculo: wo.vehicle_id || '',
+                    Descripcion: wo.description || '',
+                    Estado: wo.status || '',
+                    Total: wo.total_price || 0
+                };
+            });
+            filename = `ordenes_trabajo_${new Date().toISOString().split('T')[0]}.xlsx`;
+        } else if (dataType === 'appointments') {
+            rows = (data.appointments || []).map(a => ({
+                Fecha: a.date || '',
+                Hora: a.time || '',
+                Motivo: a.title || '',
+                Cliente: a.client || '',
+                Vehiculo: a.vehicle || '',
+                Box: a.box || '',
+                Estado: a.status || ''
+            }));
+            filename = `turnos_${new Date().toISOString().split('T')[0]}.xlsx`;
+        } else if (dataType === 'attendance') {
+            rows = (timeTrackingLogs || []).map(l => ({
+                Fecha: new Date(l.timestamp).toLocaleDateString('es-AR'),
+                Hora: new Date(l.timestamp).toLocaleTimeString('es-AR'),
+                Empleado: l.employee_name || '',
+                Evento: l.type === 'IN' ? 'ENTRADA' : 'SALIDA',
+            }));
+            filename = `asistencia_${new Date().toISOString().split('T')[0]}.xlsx`;
+        }
+
+        if (rows.length === 0) return alert('No hay datos para exportar');
+
+        // Create workbook and worksheet
+        const worksheet = XLSX.utils.json_to_sheet(rows);
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, worksheet, "Datos");
+
+        // Set column widths automatically
+        const colWidths = Object.keys(rows[0]).map(key => ({
+            wch: Math.max(key.length, ...rows.map(row => row[key] ? row[key].toString().length : 0)) + 2
+        }));
+        worksheet['!cols'] = colWidths;
+
+        // Export to file
+        XLSX.writeFile(workbook, filename);
+    };
+
+    // Historial unificado: OTs finalizadas + notas manuales
+    const getVehicleHistory = (vehicleId) => {
+        const otEntries = (data.workOrders || [])
+            .filter(wo => wo && wo.vehicle_id === vehicleId && (wo.status === 'Finalizado' || wo.status === 'Cobrado'))
+            .map(wo => ({
+                id: wo.id,
+                date: wo.completed_at || wo.created_at,
+                description: wo.description,
+                km: wo.km_at_entry || 0,
+                price: wo.total_price || 0,
+                technician: wo.mechanic_id || 'N/A',
+                source: 'OT',
+                order_number: wo.order_number
+            }));
+
+        const noteEntries = (data.vehicleNotes || [])
+            .filter(n => n && n.vehicle_id === vehicleId)
+            .map(n => ({
+                id: n.id,
+                date: n.created_at,
+                description: n.description,
+                km: n.km || 0,
+                price: n.cost || 0,
+                technician: n.technician || '',
+                source: 'NOTA'
+            }));
+
+        return [...otEntries, ...noteEntries].sort((a, b) => new Date(b.date) - new Date(a.date));
+    };
+
+    // ==========================================
+    // CRUD — Clientes
+    // ==========================================
+    const addClient = async (clientData) => {
+        const { data: newClient, error } = await supabase
+            .from('clients')
+            .insert([{
+                first_name: clientData.first_name,
+                last_name: clientData.last_name,
+                phone: clientData.phone,
+                dni: clientData.dni,
+                email: clientData.email || null,
+                is_frequent: clientData.is_frequent || false
+            }])
+            .select()
+            .single();
+
+        if (error) { console.error("Error creating client", error); throw error; }
+
+        logAudit('Crear Cliente', { client_name: clientData.first_name + ' ' + clientData.last_name, dni: clientData.dni });
+
+        setData(prev => ({ ...prev, clients: [...prev.clients, newClient] }));
+        return newClient;
+    };
+
+    const updateClient = async (id, updates) => {
+        const { data: updated, error } = await supabase
+            .from('clients').update(updates).eq('id', id).select().single();
+        if (error) { console.error("Error updating client", error); throw error; }
+        
+        logAudit('Actualizar Cliente', { client_id: id, updates });
+        
+        setData(prev => ({ ...prev, clients: prev.clients.map(c => c.id === id ? { ...c, ...updated } : c) }));
+        return updated;
+    };
+
+    const deleteClient = async (id) => {
+        const { error } = await supabase
+            .from('clients').delete().eq('id', id);
+        if (error) { console.error("Error deleting client", error); throw error; }
+        
+        logAudit('Borrar Cliente', { client_id: id });
+        
+        setData(prev => ({ ...prev, clients: prev.clients.filter(c => c.id !== id) }));
+        return true;
+    };
+
+    // ==========================================
+    // CRUD — Vehículos
+    // ==========================================
+    const addVehicle = async (vehicleData) => {
+        const { data: newVehicle, error } = await supabase
+            .from('vehicles')
+            .insert([{
+                client_id: vehicleData.client_id,
+                license_plate: vehicleData.license_plate,
+                brand: vehicleData.brand,
+                model: vehicleData.model,
+                year: parseInt(vehicleData.year) || null,
+                km: parseInt(vehicleData.km) || 0,
+                color: vehicleData.color || 'N/A',
+                health_score: 100,
+                difficulty_factor: 1.0
+            }])
+            .select()
+            .single();
+
+        if (error) { console.error("Error creating vehicle", error); throw error; }
+        logAudit('Crear Vehículo', { license_plate: vehicleData.license_plate, brand: vehicleData.brand });
+        setData(prev => ({ ...prev, vehicles: [...prev.vehicles, newVehicle] }));
+        return newVehicle;
+    };
+
+    const updateVehicle = async (id, updates) => {
+        const { data: updated, error } = await supabase
+            .from('vehicles').update(updates).eq('id', id).select().single();
+        if (error) { console.error("Error updating vehicle", error); throw error; }
+        logAudit('Actualizar Vehículo', { vehicle_id: id, updates });
+        setData(prev => ({ ...prev, vehicles: prev.vehicles.map(v => v.id === id ? { ...v, ...updated } : v) }));
+        return updated;
+    };
+
+    // ==========================================
+    // CRUD — Notas de Vehículo
+    // ==========================================
+    const addVehicleNote = async (noteData) => {
+        const { data: newNote, error } = await supabase
+            .from('vehicle_notes')
+            .insert([{
+                vehicle_id: noteData.vehicle_id,
+                description: noteData.description,
+                km: parseInt(noteData.km) || null,
+                cost: parseFloat(noteData.cost) || 0,
+                technician: noteData.technician || null,
+                note_type: noteData.note_type || 'MANUAL'
+            }])
+            .select()
+            .single();
+
+        if (error) { console.error("Error creating vehicle note", error); throw error; }
+        setData(prev => ({ ...prev, vehicleNotes: [newNote, ...prev.vehicleNotes] }));
+        return newNote;
+    };
+
+    // ==========================================
+    // CRUD — Proveedores
+    // ==========================================
+    const addSupplier = async (supplierData) => {
+        const { data: newSupplier, error } = await supabase
+            .from('suppliers')
+            .insert([{
+                name: supplierData.name,
+                contact: supplierData.contact || '',
+                phone: supplierData.phone || '',
+                cuit: supplierData.cuit || '',
+                category: supplierData.category || ''
+            }])
+            .select()
+            .single();
+
+        if (error) { console.error("Error creating supplier", error); throw error; }
+        logAudit('Crear Proveedor', { supplier_name: supplierData.name });
+        setData(prev => ({ ...prev, suppliers: [...prev.suppliers, newSupplier] }));
+        return newSupplier;
+    };
+
+    const updateSupplier = async (id, updates) => {
+        const { data: updated, error } = await supabase
+            .from('suppliers')
+            .update({
+                name: updates.name,
+                contact: updates.contact || '',
+                phone: updates.phone || '',
+                cuit: updates.cuit || '',
+                category: updates.category || ''
+            })
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) { console.error("Error updating supplier", error); throw error; }
+        logAudit('Actualizar Proveedor', { supplier_id: id, updates });
+        setData(prev => ({ ...prev, suppliers: prev.suppliers.map(s => s.id === id ? { ...s, ...updated } : s) }));
+        return updated;
+    };
+
+    // ==========================================
+    // CRUD — Inventario
+    // ==========================================
+    const addInventoryItem = async (itemData) => {
+        const { data: newItem, error } = await supabase.from('inventory').insert([itemData]).select().single();
+        if (error) { console.error("Error creating inventory item", error); throw error; }
+        logAudit('Crear Item de Inventario', { product: itemData.name, barcode: itemData.barcode });
+
+        setData(prev => ({ ...prev, inventory: [...prev.inventory, newItem] }));
+        return newItem;
+    };
+
+    const updateInventoryItem = async (id, updates) => {
+        const { data, error } = await supabase.from('inventory').update(updates).eq('id', id).select();
+        if (error) { console.error("Error updating inventory item", error); throw error; }
+
+        if (!data || data.length === 0) {
+            console.error("No item returned after update.");
+            return updates; // Return the updates as fallback
+        }
+
+        const updated = data[0];
+        logAudit('Actualizar Item de Inventario', { product_id: id, updates });
+
+        setData(prev => ({ ...prev, inventory: prev.inventory.map(i => i.id === id ? { ...i, ...updated } : i) }));
+        return updated;
+    };
+
+    const deleteInventoryItem = async (id) => {
+        const item = data.inventory.find(i => i.id === id);
+        const { error } = await supabase.from('inventory').delete().eq('id', id);
+        if (error) { console.error("Error deleting inventory item", error); throw error; }
+        logAudit('Borrar Item de Inventario', { product_id: id, product_name: item?.name });
+
+        setData(prev => ({ ...prev, inventory: prev.inventory.filter(i => i.id !== id) }));
+    };
+
+    // ==========================================
+    // Órdenes de Trabajo
+    // ==========================================
+    const addWorkOrder = async (woData) => {
+        const { data: newWo, error } = await supabase.from('work_orders').insert([{
+            client_id: woData.client_id,
+            vehicle_id: woData.vehicle_id,
+            box_id: woData.box_id || null,
+            description: woData.description,
+            km_at_entry: woData.km_at_entry || 0,
+            labor_cost: woData.labor_cost,
+            parts_cost: woData.parts_cost,
+            total_price: woData.total_price,
+            labor_profit_percent: woData.labor_profit_percent || 100,
+            status: woData.box_id ? 'En Box' : 'Pendiente'
+        }]).select('*, clients(*), vehicles(*)').single();
+
+        if (!error && newWo) {
+            // 1. Asignar mecánicos si existen
+            if (woData.mechanic_ids && woData.mechanic_ids.length > 0) {
+                const assignments = woData.mechanic_ids.map(mid => ({
+                    work_order_id: newWo.id,
+                    mechanic_id: mid,
+                    labor_commission_percent: woData.applied_commission_rate
+                }));
+                await supabase.from('work_order_assignments').insert(assignments);
+            }
+
+            // 2. Asignar productos si existen
+            if (woData.products && woData.products.length > 0) {
+                const items = woData.products.map(p => ({
+                    work_order_id: newWo.id,
+                    inventory_item_id: p.id,
+                    description: p.name,
+                    quantity: p.qty,
+                    unit_price: p.sell_price,
+                    total_price: p.sell_price * p.qty,
+                    is_labor: false
+                }));
+                await supabase.from('work_order_items').insert(items);
+
+                // Descontar stock
+                for (const p of woData.products) {
+                    if (p.stock_type === 'UNIT') {
+                        await supabase.from('inventory').update({
+                            stock_quantity: Math.max(0, (p.stock_quantity || 0) - p.qty)
+                        }).eq('id', p.id);
+                    } else if (p.stock_type === 'VOLUME') {
+                        const mlToDeduct = Math.round(p.qty * 1000);
+                        await supabase.from('inventory').update({
+                            stock_ml: Math.max(0, (p.stock_ml || 0) - mlToDeduct)
+                        }).eq('id', p.id);
+                    }
+                }
+            }
+
+
+            logAudit('Crear Orden de Trabajo', { order_number: newWo.order_number, total_price: woData.total_price });
+
+            await loadData();
+            return newWo;
+        }
+        if (error) { console.error("Error creating WO", error); throw error; }
+    };
+    
+    const addItemsToWorkOrder = async (woId, products) => {
+        if (!products || products.length === 0) return;
+        
+        try {
+            const items = products.map(p => ({
+                work_order_id: woId,
+                inventory_item_id: p.id,
+                description: p.name,
+                quantity: p.qty,
+                unit_price: p.sell_price,
+                total_price: p.sell_price * p.qty,
+                is_labor: false
+            }));
+            
+            const { error: itemsError } = await supabase.from('work_order_items').insert(items);
+            if (itemsError) throw itemsError;
+
+            // Descontar stock
+            for (const p of products) {
+                if (p.stock_type === 'UNIT') {
+                    await supabase.from('inventory').update({
+                        stock_quantity: Math.max(0, (p.stock_quantity || 0) - p.qty)
+                    }).eq('id', p.id);
+                } else if (p.stock_type === 'VOLUME') {
+                    const mlToDeduct = Math.round(p.qty * 1000);
+                    await supabase.from('inventory').update({
+                        stock_ml: Math.max(0, (p.stock_ml || 0) - mlToDeduct)
+                    }).eq('id', p.id);
+                }
+            }
+
+            // Actualizar precio total de la OT
+            const wo = data.workOrders.find(w => w.id === woId);
+            if (wo) {
+                const addedCost = products.reduce((sum, p) => sum + (p.sell_price * p.qty), 0);
+                const newPartsCost = (wo.parts_cost || 0) + addedCost;
+                const newTotal = (wo.total_price || 0) + addedCost;
+                
+                await supabase.from('work_orders').update({
+                    parts_cost: newPartsCost,
+                    total_price: newTotal
+                }).eq('id', woId);
+            }
+
+            await loadData();
+            logAudit('Agregar Productos a OT', { work_order_id: woId, products_count: products.length });
+            return true;
+        } catch (error) {
+            console.error("Error adding items to WO", error);
+            throw error;
+        }
+    };
+
+    const updateWorkOrder = async (id, updates, paymentInfo = null, afipData = null, mechanicIds = null, creditOptions = null) => {
+        const { error } = await supabase.from('work_orders').update(updates).eq('id', id);
+        if (!error) {
+            // Update assignments if mechanicIds provided
+            if (mechanicIds) {
+                try {
+                    // 1. Obtener asignaciones actuales para preservar porcentajes manuales
+                    const currentAssignments = data.assignments?.filter(a => a.work_order_id === id) || [];
+                    
+                    // 2. Eliminar antiguas
+                    await supabase.from('work_order_assignments').delete().eq('work_order_id', id);
+                    
+                    // 3. Insertar nuevas preservando el porcentaje si el mecánico es el mismo
+                    const assignments = mechanicIds.map(mid => {
+                        const existing = currentAssignments.find(ca => ca.mechanic_id === mid);
+                        // BUGFIX: Asegurar que el 0 se preserve y no se tome como falsy
+                        const hasPrevious = existing?.labor_commission_percent !== undefined && existing?.labor_commission_percent !== null;
+                        const preservedRate = hasPrevious ? existing.labor_commission_percent : (updates.applied_commission_rate || 0);
+                        
+                        return {
+                            work_order_id: id,
+                            mechanic_id: mid,
+                            labor_commission_percent: preservedRate
+                        };
+                    });
+                    
+                    if (assignments.length > 0) {
+                        await supabase.from('work_order_assignments').insert(assignments);
+                    }
+                } catch (e) {
+                    console.error('Error updating WO assignments', e);
+                }
+            }
+
+            // Si la orden se finaliza o cobra, intentar crear el pago automáticamente en caja
+            if (updates.status === 'Finalizado' || updates.status === 'Cobrado') {
+                const wo = data.workOrders?.find(w => w.id === id);
+                if (wo && wo.total_price > 0) {
+                    try {
+                        const existPayment = data.payments?.some(p => p.work_order_id === id);
+                        if (!existPayment) {
+                            const method = paymentInfo?.method || 'EFECTIVO';
+                            const combined = paymentInfo?.combinedAmounts;
+                            const mainMechanicId = (mechanicIds && mechanicIds.length > 0) ? mechanicIds[0] : (wo.mechanic_id || null);
+
+                            if (method === 'COMBINADO' && combined) {
+                                for (const [m, amount] of Object.entries(combined)) {
+                                    const amt = parseFloat(amount);
+                                    if (amt > 0) {
+                                        await addPayment({
+                                            amount: amt,
+                                            method: m,
+                                            description: `Pago OT #${wo.order_number} (${m})`,
+                                            type: 'INGRESO',
+                                            reference: 'OT',
+                                            work_order_id: wo.id,
+                                            employee_id: mainMechanicId,
+                                            cae: afipData ? afipData.cae : null,
+                                            cae_due_date: afipData ? afipData.caeDueDate : null,
+                                            receipt_number: afipData ? afipData.receiptText : null
+                                        });
+                                    }
+                                }
+                            } else if (method === 'CREDITO_CASA' && creditOptions) {
+                                const initialPay = parseFloat(creditOptions.initial_payment || 0);
+                                const interest = parseFloat(creditOptions.interest_rate || 0);
+                                const totalWithInterest = wo.total_price * (1 + interest / 100);
+
+                                const creditRecord = await addClientCredit({
+                                    client_id: creditOptions.client_id,
+                                    work_order_id: wo.id,
+                                    total_amount: totalWithInterest,
+                                    initial_payment: initialPay,
+                                    current_balance: totalWithInterest - initialPay,
+                                    interest_rate: interest,
+                                    payment_frequency: creditOptions.payment_frequency,
+                                    next_payment_date: creditOptions.next_payment_date,
+                                    notes: `OT #${wo.order_number}`
+                                });
+
+                                // Registrar el pago inicial (o 0 si no hay) vinculado al crédito
+                                await addPayment({
+                                    amount: initialPay,
+                                    method: 'CREDITO_CASA',
+                                    description: `Crédito OT #${wo.order_number}${initialPay > 0 ? ' (Pago Inicial)' : ''}`,
+                                    type: 'INGRESO',
+                                    reference: 'OT',
+                                    work_order_id: wo.id,
+                                    employee_id: mainMechanicId,
+                                    client_credit_id: creditRecord.id
+                                });
+                            } else {
+                                await addPayment({
+                                    amount: wo.total_price,
+                                    method: method,
+                                    description: `Pago OT #${wo.order_number}`,
+                                    type: 'INGRESO',
+                                    reference: 'OT',
+                                    work_order_id: wo.id,
+                                    employee_id: mainMechanicId,
+                                    cae: afipData ? afipData.cae : null,
+                                    cae_due_date: afipData ? afipData.caeDueDate : null,
+                                    receipt_number: afipData ? afipData.receiptText : null
+                                });
+                            }
+                        }
+                    } catch (e) {
+                        console.error('No se pudo automatizar el pago de la OT', e);
+                    }
+                }
+            }
+
+            logAudit('Actualizar Orden de Trabajo', { work_order_id: id, status: updates.status, ...updates });
+
+            setData(prev => ({
+                ...prev,
+                workOrders: prev.workOrders.map(wo => wo.id === id ? { ...wo, ...updates } : wo)
+            }));
+        }
+    };
+
+    // ==========================================
+    // Promociones
+    // ==========================================
+    const addPromotion = async (promoData) => {
+        const { data: newPromo, error } = await supabase.from('promotions').insert([promoData]).select().single();
+        if (error) { console.error("Error creating promotion", error); throw error; }
+        logAudit('Crear Promoción', { coupon: promoData.coupon_code || promoData.title });
+        setData(prev => ({ ...prev, promotions: [newPromo, ...prev.promotions] }));
+        return newPromo;
+    };
+
+    const deletePromotion = async (id) => {
+        const { error } = await supabase.from('promotions').delete().eq('id', id);
+        if (error) { console.error("Error deleting promotion", error); throw error; }
+        logAudit('Borrar Promoción', { promo_id: id });
+        setData(prev => ({ ...prev, promotions: prev.promotions.filter(p => p.id !== id) }));
+    };
+
+    const addAppointment = async (aptData) => {
+        const { data: newApt, error } = await supabase.from('appointments').insert([aptData]).select().single();
+        if (error) { console.error("Error creating appointment", error); throw error; }
+        logAudit('Crear Turno', { date: aptData.date, client: aptData.client_name });
+        setData(prev => ({ ...prev, appointments: [...prev.appointments, newApt].sort((a, b) => a.date.localeCompare(b.date)) }));
+        return newApt;
+    };
+
+    const deleteAppointment = async (id) => {
+        const { error } = await supabase.from('appointments').delete().eq('id', id);
+        if (error) { console.error("Error deleting appointment", error); throw error; }
+        setData(prev => ({ ...prev, appointments: prev.appointments.filter(a => a.id !== id) }));
+    };
+
+    const deleteWorkOrder = async (id) => {
+        try {
+            console.log("Iniciando borrado de OT:", id);
+            
+            const { error: err1 } = await supabase.from('payments').delete().eq('work_order_id', id);
+            if (err1) throw new Error("Pagos: " + err1.message);
+
+            const { error: err2 } = await supabase.from('work_order_assignments').delete().eq('work_order_id', id);
+            if (err2) throw new Error("Asignaciones: " + err2.message);
+
+            const { error: err3 } = await supabase.from('work_order_items').delete().eq('work_order_id', id);
+            if (err3) throw new Error("Items: " + err3.message);
+
+            const { data, error: err4 } = await supabase.from('work_orders').delete().eq('id', id).select();
+            if (err4) throw new Error("OT: " + err4.message);
+            
+            if (!data || data.length === 0) {
+                 throw new Error("No se pudo borrar. Es posible que no tengas permisos (RLS) o el ID (" + id + ") no exista.");
+            }
+
+            setData(prev => ({
+                ...prev,
+                workOrders: prev.workOrders.filter(wo => wo.id !== id),
+                assignments: (prev.assignments || []).filter(a => a.work_order_id !== id),
+                payments: (prev.payments || []).filter(p => p.work_order_id !== id)
+            }));
+            
+            logAudit('Borrar Orden de Trabajo', { work_order_id: id });
+            
+            alert('OT eliminada exitosamente.');
+            return true;
+        } catch (e) {
+            console.error("Error deleting work order", e);
+            alert("No se pudo eliminar la OT: " + e.message);
+            throw e;
+        }
+    };
+
+    // ==========================================
+    // Facturación AFIP
+    // ==========================================
+    const generateAFIPInvoice = async (invoiceData) => {
+        try {
+            const baseUrl = window.location.hostname === 'localhost' ? 'http://localhost:5173' : '';
+            const res = await fetch(`${baseUrl}/api/afip`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(invoiceData)
+            });
+            const data = await res.json();
+            if (!data.success) throw new Error(data.error);
+            return data;
+        } catch (error) {
+            console.error('Error generando Factura AFIP:', error);
+            throw error;
+        }
+    };
+
+    // ==========================================
+    // Créditos de la Casa (Cuentas Corrientes)
+    // ==========================================
+    const addClientCredit = async (creditData) => {
+        const { data: newCredit, error } = await supabase
+            .from('client_credits')
+            .insert([{
+                client_id: creditData.client_id,
+                work_order_id: creditData.work_order_id || null,
+                total_amount: parseFloat(creditData.total_amount),
+                initial_payment: parseFloat(creditData.initial_payment || 0),
+                current_balance: parseFloat(creditData.current_balance),
+                interest_rate: parseFloat(creditData.interest_rate || 0),
+                payment_frequency: creditData.payment_frequency || 'LIBRE',
+                next_payment_date: creditData.next_payment_date || null,
+                notes: creditData.notes || ''
+            }])
+            .select()
+            .single();
+
+        if (error) { console.error("Error adding client credit", error); throw error; }
+        
+        setData(prev => ({ 
+            ...prev, 
+            clientCredits: [newCredit, ...prev.clientCredits] 
+        }));
+        
+        logAudit('Crear Crédito de la Casa', { client_id: creditData.client_id, amount: creditData.total_amount });
+        return newCredit;
+    };
+
+    const recordCreditPayment = async (creditId, paymentData) => {
+        // 1. Registrar el pago en la tabla central de pagos (para que figure en caja)
+        const newPayment = await addPayment({
+            ...paymentData,
+            client_credit_id: creditId,
+            type: 'INGRESO',
+            description: paymentData.description || 'Cobro de Cuota/Crédito'
+        });
+
+        // 2. Actualizar el saldo en la tabla de créditos
+        const credit = data.clientCredits.find(c => c.id === creditId);
+        if (!credit) return newPayment;
+
+        const newBalance = Math.max(0, parseFloat(credit.current_balance) - parseFloat(paymentData.amount));
+        const status = newBalance <= 0 ? 'PAGADO' : credit.status;
+
+        const { error: updateError } = await supabase
+            .from('client_credits')
+            .update({ 
+                current_balance: newBalance,
+                status: status
+            })
+            .eq('id', creditId);
+
+        if (updateError) { console.error("Error updating credit balance", updateError); }
+
+        // Actualizar estado local
+        setData(prev => ({
+            ...prev,
+            clientCredits: prev.clientCredits.map(c => c.id === creditId ? { ...c, current_balance: newBalance, status } : c)
+        }));
+
+        logAudit('Registrar Pago de Crédito', { credit_id: creditId, amount: paymentData.amount });
+        return newPayment;
+    };
+
+    // ==========================================
+    // Pagos y Caja
+    // ==========================================
+    const addPayment = async (paymentData) => {
+        const today = new Date().toISOString().split('T')[0];
+        const { data: newPayment, error } = await supabase
+            .from('payments')
+            .insert([{
+                amount: parseFloat(paymentData.amount),
+                method: paymentData.method || 'EFECTIVO',
+                date: today,
+                reference: paymentData.reference || null,
+                work_order_id: paymentData.work_order_id || null,
+                description: paymentData.description || 'Ingreso',
+                type: paymentData.type || 'INGRESO',
+                employee_id: paymentData.employee_id || null,
+                cae: paymentData.cae || null,
+                cae_due_date: paymentData.cae_due_date || null,
+                receipt_number: paymentData.receipt_number || null,
+                client_credit_id: paymentData.client_credit_id || null
+            }])
+            .select()
+            .single();
+
+        if (error) { console.error("Error adding payment", error); throw error; }
+
+
+        setData(prev => ({ ...prev, payments: [newPayment, ...prev.payments] }));
+        
+        logAudit('Registrar Pago/Ingreso', { amount: paymentData.amount, method: paymentData.method, description: paymentData.description });
+        
+        return newPayment;
+    };
+
+    const addWithdrawal = async (withdrawalData) => {
+        const today = new Date().toISOString().split('T')[0];
+        const { data: newWithdrawal, error } = await supabase
+            .from('payments')
+            .insert([{
+                amount: -Math.abs(parseFloat(withdrawalData.amount)),
+                method: 'EFECTIVO',
+                date: today,
+                reference: null,
+                description: withdrawalData.description || 'Retiro de caja',
+                type: 'EGRESO',
+                employee_id: withdrawalData.employee_id || null
+            }])
+            .select()
+            .single();
+
+        if (error) { console.error("Error adding withdrawal", error); throw error; }
+
+        setData(prev => ({ ...prev, payments: [newWithdrawal, ...prev.payments] }));
+        logAudit('Retiro de Efectivo', { amount: Math.abs(parseFloat(withdrawalData.amount)), description: withdrawalData.description });
+        return newWithdrawal;
+    };
+
+    const updatePayment = async (id, updates) => {
+        const { data: updated, error } = await supabase
+            .from('payments')
+            .update(updates)
+            .eq('id', id)
+            .select();
+
+        if (error) { console.error("Error updating payment", error); throw error; }
+
+        const paymentReturned = updated && updated.length > 0 ? updated[0] : updates;
+
+        setData(prev => ({
+            ...prev,
+            payments: prev.payments.map(p => p.id === id ? { ...p, ...paymentReturned } : p)
+        }));
+
+        return paymentReturned;
+    };
+
+    const deletePayment = async (id) => {
+        const { error } = await supabase.from('payments').delete().eq('id', id);
+        if (error) { console.error("Error deleting payment", error); throw error; }
+
+        setData(prev => ({ ...prev, payments: prev.payments.filter(p => p.id !== id) }));
+        
+        logAudit('Eliminar Pago/Movimiento', { payment_id: id });
+    };
+
+    const performCashClose = async (closeData) => {
+        const today = new Date().toISOString().split('T')[0];
+
+        // Find previous closing balance
+        const sortedClosings = (data.cashClosings || []).sort((a, b) => new Date(b.created_at || b.date) - new Date(a.created_at || a.date));
+        const lastClosing = sortedClosings.length > 0 ? sortedClosings[0] : null;
+        const startingBalance = lastClosing ? (lastClosing.actual_cash || 0) : 0;
+
+        const { data: closingResult, error } = await supabase
+            .from('cash_closings')
+            .insert([{
+                date: today,
+                starting_balance: startingBalance,
+                cash_income: closeData.cash_expected || 0,
+                transfer_income: closeData.transfer_total || 0,
+                card_income: closeData.card_total || 0,
+                expected_cash: (closeData.cash_expected || 0) + startingBalance,
+                actual_cash: closeData.cash_real || 0,
+                difference: closeData.difference || 0,
+                employee_id: closeData.employee_id || null
+            }])
+            .select();
+
+        if (error) { console.error("Error performing cash close", error); throw error; }
+
+        const closing = closingResult && closingResult.length > 0 ? closingResult[0] : null;
+
+        // Mark all unclosed payments with this closing ID
+        const unclosedPayments = data.payments.filter(p => !p.cash_closing_id).map(p => p.id);
+
+        if (unclosedPayments.length > 0 && closing?.id) {
+            await supabase
+                .from('payments')
+                .update({ cash_closing_id: closing.id })
+                .in('id', unclosedPayments);
+        }
+
+
+        // Reload all data so the view refreshes with the marked payments
+        await loadData();
+        
+        logAudit('Cierre de Caja Realizado', { date: today, actual_cash: closeData.actual_cash, difference: closeData.difference });
+        
+        return closing;
+    };
+
+    // ==========================================
+    // Punto de Venta — processSale
+    // ==========================================
+    const processSale = async (cart, payMethod, afipData = null, employeeId = null, cashierProfit = 0, creditOptions = null) => {
+        const total = cart.reduce((sum, ci) => sum + (ci.sell_price * ci.qty), 0);
+        const today = new Date().toISOString().split('T')[0];
+        
+        let clientId = creditOptions?.client_id || null;
+
+        // 1. Registrar el pago
+        const { data: payment, error: payError } = await supabase
+            .from('payments')
+            .insert([{
+                amount: total,
+                method: payMethod,
+                date: today,
+                description: `Venta POS: ${cart.map(ci => `${ci.qty}x ${ci.name}`).join(', ')}`,
+                type: 'VENTA',
+                reference: null,
+                employee_id: employeeId || null,
+                cashier_profit_amount: cashierProfit,
+                cae: afipData?.cae || null,
+                cae_due_date: afipData?.cae_due_date || null,
+                receipt_number: afipData?.receipt_number || null,
+                client_credit_id: null // Se actualizará si es crédito
+            }])
+            .select()
+            .single();
+
+        if (payError) { console.error("Error registering sale", payError); throw payError; }
+
+        let creditRecord = null;
+        if (payMethod === 'CREDITO_CASA' && clientId) {
+            const initialPay = parseFloat(creditOptions.initial_payment || 0);
+            const interest = parseFloat(creditOptions.interest_rate || 0);
+            const totalWithInterest = total * (1 + interest / 100);
+            
+            creditRecord = await addClientCredit({
+                client_id: clientId,
+                total_amount: totalWithInterest,
+                initial_payment: initialPay,
+                current_balance: totalWithInterest - initialPay,
+                interest_rate: interest,
+                payment_frequency: creditOptions.payment_frequency,
+                next_payment_date: creditOptions.next_payment_date,
+                notes: `Venta POS #${payment.id}`
+            });
+
+            // Vincular el pago original al crédito
+            if (creditRecord) {
+                await supabase.from('payments').update({ client_credit_id: creditRecord.id }).eq('id', payment.id);
+                // Si hubo pago inicial, el registro de 'payment' debe reflejar solo ese monto
+                if (initialPay > 0) {
+                    await supabase.from('payments').update({ amount: initialPay }).eq('id', payment.id);
+                } else {
+                    // Si no hubo pago inicial, el monto del 'payment' técnico es 0 (pero registra la venta)
+                    await supabase.from('payments').update({ amount: 0 }).eq('id', payment.id);
+                }
+            }
+        }
+        for (const ci of cart) {
+            if (ci.is_manual) continue;
+            
+            if (ci.stock_type === 'UNIT') {
+                await supabase.from('inventory').update({
+                    stock_quantity: Math.max(0, (ci.stock_quantity || 0) - ci.qty)
+                }).eq('id', ci.id);
+            } else if (ci.stock_type === 'VOLUME') {
+                // Para VOLUME, ci.qty representa Litros. Descontamos en ml.
+                const mlToDeduct = Math.round(ci.qty * 1000);
+                await supabase.from('inventory').update({
+                    stock_ml: Math.max(0, (ci.stock_ml || 0) - mlToDeduct)
+                }).eq('id', ci.id);
+            }
+        }
+
+        // 3. Informar
+        await loadData();
+        
+        logAudit('Procesar Venta POS', { total, payMethod, items_count: cart.length });
+        
+        return total;
+    };
+
+    const updateAssignmentCommission = async (assignmentId, updates) => {
+        const { error } = await supabase
+            .from('work_order_assignments')
+            .update(updates)
+            .eq('id', assignmentId);
+
+        if (error) { console.error("Error updating commission", error); throw error; }
+        logAudit('Actualizar Comisión de Mecánico', { assignment_id: assignmentId, updates });
+        await loadData();
+    };
+
+    // ==========================================
+    // Comisiones
+    // ==========================================
+    const getCommissions = (employeeId) => {
+        // 1. Comisiones por Órdenes de Trabajo (OT)
+        const assignments = (data.assignments || []).filter(a => a.mechanic_id === employeeId);
+        const otCommissions = assignments.reduce((sum, a) => {
+            const wo = data.workOrders?.find(w => w.id === a.work_order_id);
+            if (wo && (wo.status === 'Finalizado' || wo.status === 'Cobrado')) {
+                const labor = parseFloat(wo.labor_cost) || 0;
+                const emp = (data.employees || []).find(e => e.id === employeeId);
+                const rate = wo.applied_commission_rate ? parseFloat(wo.applied_commission_rate) : (emp ? parseFloat(emp.commission_rate) : 0);
+                return sum + (labor * (rate / 100));
+            }
+            return sum;
+        }, 0);
+
+        // 2. Comisiones por Servicios Rápidos (Gomería)
+        const emp = (data.employees || []).find(e => e.id === employeeId);
+        const commissionRate = emp ? parseFloat(emp.commission_rate) || 0 : 0;
+        
+        const quickAssignments = (data.quickServiceAssignments || []).filter(a => a.employee_id === employeeId);
+        const quickCommissions = quickAssignments.reduce((sum, a) => {
+            const qs = (data.dailyQuickServices || []).find(s => s.id === a.quick_service_id);
+            if (!qs) return sum;
+
+            const siblingAssignments = (data.quickServiceAssignments || []).filter(sa => sa.quick_service_id === qs.id);
+            const mechanicsCount = Math.max(1, siblingAssignments.length);
+            const share = (parseFloat(qs.price) || 0) / mechanicsCount;
+            
+            return sum + (share * (commissionRate / 100));
+        }, 0);
+        // 3. Comisiones de Cajero (Ventas POS)
+        const cashierCommissions = (data.payments || [])
+            .filter(p => p.employee_id === employeeId && p.type === 'VENTA')
+            .reduce((sum, p) => sum + (parseFloat(p.cashier_profit_amount) || 0), 0);
+
+        return otCommissions + quickCommissions + cashierCommissions;
+    };
+
+    const getDetailedEmployeeStats = (employeeId, filters = {}) => {
+        const { startDate, endDate } = filters;
+        
+        let logs = (timeTrackingLogs || []).filter(l => l.employee_id === employeeId);
+        
+        // Aplicar filtros de fecha si existen
+        if (startDate || endDate) {
+            logs = logs.filter(l => {
+                const logDate = new Date(l.timestamp);
+                if (startDate && logDate < new Date(startDate)) return false;
+                if (endDate) {
+                    const end = new Date(endDate);
+                    end.setHours(23, 59, 59, 999);
+                    if (logDate > end) return false;
+                }
+                return true;
+            });
+        }
+
+        // Calcular horas trabajadas
+        let totalMs = 0;
+        const processedLogs = [...logs].reverse(); // De más viejo a más nuevo
+        let lastIn = null;
+        
+        processedLogs.forEach(log => {
+            if (log.type === 'IN') {
+                lastIn = new Date(log.timestamp);
+            } else if (log.type === 'OUT' && lastIn) {
+                totalMs += (new Date(log.timestamp) - lastIn);
+                lastIn = null;
+            }
+        });
+        
+        const totalHours = totalMs / (1000 * 60 * 60);
+
+        // Producción en OTs
+        const assignments = (data.assignments || []).filter(a => a.mechanic_id === employeeId);
+        const otProduction = assignments.map(a => {
+            const wo = data.workOrders?.find(w => w.id === a.work_order_id);
+            const date = wo?.completed_at || wo?.created_at;
+            
+            // Filtro de fecha para OTs
+            if (startDate || endDate) {
+                const itemDate = new Date(date);
+                if (startDate && itemDate < new Date(startDate)) return null;
+                if (endDate) {
+                    const end = new Date(endDate);
+                    end.setHours(23, 59, 59, 999);
+                    if (itemDate > end) return null;
+                }
+            }
+
+            return {
+                id: a.id,
+                date,
+                type: 'OT',
+                description: wo?.description || 'Órden de Trabajo',
+                order_number: wo?.order_number,
+                amount: parseFloat(wo?.labor_cost) || 0,
+                status: wo?.status
+            };
+        }).filter(item => item && (item.status === 'Finalizado' || item.status === 'Cobrado'));
+
+        // Producción en Gomería
+        const quickAssignments = (data.quickServiceAssignments || []).filter(a => a.employee_id === employeeId);
+        const quickProduction = quickAssignments.map(a => {
+            const s = (data.dailyQuickServices || []).find(qs => qs.id === a.quick_service_id);
+            if (!s) return null;
+
+            const date = s.created_at;
+            
+            // Filtro de fecha para Gomería
+            if (startDate || endDate) {
+                const itemDate = new Date(date);
+                if (startDate && itemDate < new Date(startDate)) return null;
+                if (endDate) {
+                    const end = new Date(endDate);
+                    end.setHours(23, 59, 59, 999);
+                    if (itemDate > end) return null;
+                }
+            }
+
+            // Cálculo proporcional: si hay N mecánicos en el servicio, este recibe 1/N del monto
+            const siblingAssignments = (data.quickServiceAssignments || []).filter(sa => sa.quick_service_id === s.id);
+            const mechanicsCount = Math.max(1, siblingAssignments.length);
+            const share = (parseFloat(s.price) || 0) / mechanicsCount;
+
+            return {
+                id: s.id,
+                date,
+                type: 'GOMERÍA',
+                description: s.service_type || 'Servicio Rápido',
+                amount: share,
+                status: 'Finalizado',
+                isShared: mechanicsCount > 1
+            };
+        }).filter(item => item !== null);
+
+        // Producción de Cajeros (Ventas POS)
+        const posProduction = (data.payments || [])
+            .filter(p => p.employee_id === employeeId && p.type === 'VENTA')
+            .map(p => {
+                const date = p.date || p.created_at;
+                
+                // Filtro de fecha para POS
+                if (startDate || endDate) {
+                    const itemDate = new Date(date);
+                    if (startDate && itemDate < new Date(startDate)) return null;
+                    if (endDate) {
+                        const end = new Date(endDate);
+                        end.setHours(23, 59, 59, 999);
+                        if (itemDate > end) return null;
+                    }
+                }
+
+                return {
+                    id: p.id,
+                    date,
+                    type: 'PUNTO DE VENTA',
+                    description: p.description || 'Venta de Mostrador',
+                    amount: parseFloat(p.amount) || 0,
+                    status: 'Finalizado'
+                };
+            }).filter(item => item !== null);
+
+        const combinedProduction = [...otProduction, ...quickProduction, ...posProduction].sort((a, b) => new Date(b.date) - new Date(a.date));
+        const totalProductionAmount = combinedProduction.reduce((sum, item) => sum + item.amount, 0);
+
+        return {
+            totalHours: totalHours.toFixed(1),
+            attendanceLogs: logs,
+            productionList: combinedProduction,
+            totalProductionAmount,
+            productionCount: combinedProduction.length
+        };
+    };
+
+    const getEmployeeProductivity = (employeeId) => {
+        const stats = getDetailedEmployeeStats(employeeId);
+        return {
+            count: stats.productionCount,
+            total_labor: stats.totalProductionAmount,
+            commission: getCommissions(employeeId)
+        };
+    };
+
+    return (
+        <AppContext.Provider value={{
+            data,
+            timeTrackingLogs,
+            loading,
+            refreshData: loadData,
+            addTimeLog,
+            deleteTimeLog,
+            getClient,
+            getVehicle,
+            getClientVehicles,
+            getLowStockItems,
+            getVehicleHistory,
+            addClient,
+            updateClient,
+            deleteClient,
+            addVehicle,
+            updateVehicle,
+            addVehicleNote,
+            addInventoryItem,
+            updateInventoryItem,
+            deleteInventoryItem,
+            addSupplier,
+            updateSupplier,
+            addWorkOrder,
+            deleteWorkOrder,
+            addItemsToWorkOrder,
+            updateWorkOrder,
+            addPayment,
+            updatePayment,
+            deletePayment,
+            addWithdrawal,
+            performCashClose,
+            processSale,
+            updateAssignmentCommission,
+            getCommissions,
+            getEmployeeProductivity,
+            getDetailedEmployeeStats,
+            addQuickService,
+            getActiveEmployees,
+            exportToExcel,
+            addPromotion,
+            deletePromotion,
+            addAppointment,
+            deleteAppointment,
+            addClientCredit,
+            recordCreditPayment,
+            generateAFIPInvoice,
+            // POS Global
+            posCart,
+            setPosCart,
+            addToPosCart,
+            removeFromPosCart,
+            clearPosCart,
+            gomeriaQueue,
+            setGomeriaQueue,
+            addToQueue,
+            removeFromQueue
+        }}>
+            {children}
+        </AppContext.Provider>
+    );
+};
+
+export const useApp = () => useContext(AppContext);
