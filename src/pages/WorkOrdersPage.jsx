@@ -306,7 +306,7 @@ export const WorkOrdersPage = () => {
 
     return (
         <div className="page-content">
-            <div className="page-grid" style={{ gridTemplateColumns: '1fr' }}>
+            <div className="page-grid">
                 <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
                     <Tabs tabs={[{ key: 'active', label: 'Activas' }, { key: 'done', label: 'Finalizadas' }, { key: 'all', label: 'Todas' }]} active={tab} onChange={setTab} />
                     <div style={{ flex: 1 }} />
@@ -404,7 +404,7 @@ export const WorkOrdersPage = () => {
                 </div>
 
                 {showNew && (
-                    <Modal title="Nueva Orden de Trabajo" onClose={() => setShowNew(false)} width="800px"
+                    <Modal title="Nueva Orden de Trabajo" onClose={() => setShowNew(false)}
                         footer={<Fragment><button className="btn btn-ghost" onClick={() => setShowNew(false)} disabled={isCreatingOT}>Cancelar</button><button className="btn btn-primary" onClick={handleCreateWorkOrder} disabled={isCreatingOT}><Icon name="print" size={16} /> {isCreatingOT ? 'Creando...' : 'Crear OT'}</button></Fragment>}>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
                             {newOrder.client_id ? (
@@ -620,9 +620,9 @@ export const WorkOrdersPage = () => {
                 {finalizeWO && (() => {
                     const wo = MOCK.workOrders.find(w => w.id === finalizeWO);
                     return (
-                        <Modal title={`Finalizar OT #${wo?.order_number}`} onClose={() => setFinalizeWO(null)} width="600px">
+                        <Modal title={`Finalizar OT #${wo?.order_number}`} onClose={() => setFinalizeWO(null)}>
                             <div style={{ padding: 12, marginBottom: 16, background: 'var(--bg-hover)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}>
-                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+                                <div className="grid-2col-even" style={{ gap: 12, marginBottom: 12 }}>
                                     <FormField label="Mano de Obra ($)">
                                         <input type="number" className="form-input" value={editLabor} onChange={e => setEditLabor(e.target.value)} />
                                     </FormField>
@@ -760,7 +760,7 @@ export const WorkOrdersPage = () => {
                 })()}
 
                 {vehicleSheet && (
-                    <Modal title="Ficha Histórica del Vehículo" width="800px" onClose={() => setVehicleSheet(null)}>
+                    <Modal title="Ficha Histórica del Vehículo" onClose={() => setVehicleSheet(null)}>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
                             <div className="glass-card" style={{ padding: 20, display: 'flex', gap: 20, alignItems: 'center' }}>
                                 <Icon name="directions_car" size={48} style={{ color: 'var(--primary)' }} />

@@ -159,7 +159,7 @@ export const DashboardPage = () => {
 
     return (
         <div className="page-content">
-            <div className="page-grid" style={{ gridTemplateColumns: '1fr' }}>
+            <div className="page-grid">
                 {/* KPI Row */}
                 <div className="grid-stats">
                     <StatCard icon="payments" label="Caja del Día" value={formatCurrency(todayTotal)} sub="Cobros procesados hoy" tag="LIVE" barPercent={75} />
@@ -172,7 +172,7 @@ export const DashboardPage = () => {
                 {oilTanks.length > 0 && (
                     <div style={{ marginBottom: 24 }}>
                         <SectionHeader icon="opacity" title="Tanques de Aceite (Suelto)" />
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 16 }}>
+                        <div className="grid-auto-cards-sm">
                             {oilTanks.map(tank => {
                                 const capacity = tank.container_size_ml || 50000;
                                 const percent = (tank.stock_ml / capacity) * 100;
@@ -239,7 +239,7 @@ export const DashboardPage = () => {
                                 <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16 }}>
                                     Mes: {formatCurrency(revenue.monthly_total)}
                                 </div>
-                                <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 70 }}>
+                                <div className="revenue-chart-container" style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 70, marginTop: 16 }}>
                                     {revenue.daily.map((d, i) => {
                                         const max = Math.max(...revenue.daily.map(x => x.cash || 0));
                                         const total = d.cash || 0;

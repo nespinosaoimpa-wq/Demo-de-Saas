@@ -74,6 +74,7 @@ function App() {
     const [scannedQuantity, setScannedQuantity] = useState(1);
     const [showCameraScanner, setShowCameraScanner] = useState(false);
     const [scannedUnknownCode, setScannedUnknownCode] = useState(null);
+    const [showHeaderMore, setShowHeaderMore] = useState(false);
 
     const { addTimeLog } = useApp();
     const [showTimeModal, setShowTimeModal] = useState(false);
@@ -320,7 +321,6 @@ function App() {
                         <button
                             className="btn-icon mobile-menu"
                             onClick={() => setSidebarOpen(!sidebarOpen)}
-                            style={{ display: 'none' }}
                         >
                             <Icon name="menu" size={22} />
                         </button>
@@ -339,23 +339,50 @@ function App() {
                             <Icon name="notifications" size={20} />
                             <span className="notif-dot" />
                         </button>
-                        <button className="header-btn" onClick={() => setShowTimeModal(true)}>
-                            <Icon name="schedule" size={16} />
-                            Fichar Ingreso/Salida
-                        </button>
-                        <button className="header-btn" onClick={() => setShowCameraScanner(true)}>
-                            <Icon name="photo_camera" size={16} />
-                            Cámara (Móvil)
-                        </button>
-                        <button className="header-btn" onClick={() => alert('Esperando código del lector láser USB/Bluetooth...')}>
-                            <Icon name="qr_code_scanner" size={16} />
-                            Lector Láser
-                        </button>
-                        {isVisible('work_orders') && (
-                            <button className="header-btn primary" onClick={() => handleNavigate('work_orders')}>
-                                <Icon name="add_circle" size={16} />
-                                <span>Nueva OT</span>
+
+                        <div className="header-actions-desktop">
+                            <button className="header-btn" onClick={() => setShowTimeModal(true)}>
+                                <Icon name="schedule" size={16} />
+                                <span className="hide-tablet">Fichar Ingreso/Salida</span>
                             </button>
+                            <button className="header-btn" onClick={() => setShowCameraScanner(true)}>
+                                <Icon name="photo_camera" size={16} />
+                                <span className="hide-tablet">Cámara</span>
+                            </button>
+                            {isVisible('work_orders') && (
+                                <button className="header-btn primary" onClick={() => handleNavigate('work_orders')}>
+                                    <Icon name="add_circle" size={16} />
+                                    <span>Nueva OT</span>
+                                </button>
+                            )}
+                        </div>
+
+                        <button className="btn-icon show-mobile" onClick={() => setShowHeaderMore(!showHeaderMore)}>
+                            <Icon name="more_vert" size={22} />
+                        </button>
+
+                        {showHeaderMore && (
+                            <div className="header-more-menu animate-in" style={{
+                                position: 'absolute', top: 'calc(var(--header-height) - 8px)', right: 8,
+                                background: 'var(--bg-card)', border: '1px solid var(--border)',
+                                borderRadius: 'var(--radius)', padding: 6, zIndex: 1000,
+                                boxShadow: 'var(--shadow-lg)', display: 'flex', flexDirection: 'column', minWidth: 200
+                            }}>
+                                <button className="nav-item" onClick={() => { setShowTimeModal(true); setShowHeaderMore(false); }}>
+                                    <Icon name="schedule" size={18} /> <span>Fichar Ingreso/Salida</span>
+                                </button>
+                                <button className="nav-item" onClick={() => { setShowCameraScanner(true); setShowHeaderMore(false); }}>
+                                    <Icon name="photo_camera" size={18} /> <span>Usar Cámara (QR)</span>
+                                </button>
+                                <button className="nav-item" onClick={() => { alert('Esperando código del lector láser USB/Bluetooth...'); setShowHeaderMore(false); }}>
+                                    <Icon name="qr_code_scanner" size={18} /> <span>Lector Láser</span>
+                                </button>
+                                {isVisible('work_orders') && (
+                                    <button className="nav-item" onClick={() => { handleNavigate('work_orders'); setShowHeaderMore(false); }}>
+                                        <Icon name="add_circle" size={18} style={{ color: 'var(--primary)' }} /> <strong>Nueva OT</strong>
+                                    </button>
+                                )}
+                            </div>
                         )}
                     </div>
                 </header>
